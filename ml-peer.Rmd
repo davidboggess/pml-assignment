@@ -1,0 +1,100 @@
+---
+title: "Predicting Exersize Class"
+author: "Sam Gambrell"
+date: "September 15, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Loading Data
+First we download the data from the provided sources if it's not locally available.  The data is then loaded in R.  NA values are stored in the file as '#DIV/0','', and 'NA'.  This data is from the *Weight Lifting Exersize Dataset* which can be found at http://groupware.les.inf.puc-rio.br/har.
+```{r}
+if(!file.exists("pml-training.csv"))
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv","pml-training.csv")
+if(!file.exists("pml-testing.csv"))
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv","pml-testing.csv")
+
+pml <- read.csv("pml-training.csv", na.strings=c("#DIV/0!","","NA"))
+pml.test <- read.csv("pml-testing.csv", na.strings=c("#DIV/0!","","NA"))
+```
+
+##Cleaning Data
+Because the final model will be used to predict the data from the testing file we remove any columns from the training data that are missing from the testing data.  We also remove variables that are not measurements such as index, time stamps, window info, and user name.
+```{r}
+test.na <- sapply(pml.test, function(x){any(is.na(x))})
+pml <- pml[,!test.na]
+
+pml <- pml[,-(1:7)]
+
+sum(is.na(pml))
+```
+A check of the sum of is.na returns 0, meaning we have no NA's withing our cleaned data set.
+
+##Testing Method
+Twenty percent of the data is removed for testing before any machine learning is performed.  The models will initially be re-sampled using the CV method which is implemented through the caret package's *trainControl*.  A more robust testing method would have been to use a 10 fold repeated cv but due to the computational power of available hardware a 5 fold cv was used.
+```{r message=FALSE, results='hide'}
+library(caret)
+ctrl <- trainControl(method = "cv", number = 5)
+
+set.seed(5345)
+inTrain <- createDataPartition(pml$classe, p=0.8, list=FALSE)
+
+training <- pml[inTrain,]
+testing <- pml[-inTrain,]
+```
+
+##Running Models
+Eight models are run against the training data using the default settings in the caret package:  Random Forest (rf), Stochastic Gradient Boosting (gbm), Bagged CART (treebag), Linear Discriminant Analysis , CART (rpart), Support Vector Machines with Radial Basis Function Kernel (svmRadial), k-Nearest Neighbors (knn), and eXtreme Gradient Boosting (xgbTree).  The only reason for selecting the following eight models is that they all perform classification and the previous (but limit) experience the author has had with using these models.
+```{r message=FALSE, results='hide'}
+library(doParallel)
+cl <- makeCluster(detectCores()-1)
+registerDoParallel(cl)
+
+
+fit <- list()
+models <- c("rf", "gbm", "treebag", "lda", "rpart", "svmRadial", "knn", "xgbTree")
+for(usemethod in models){
+  set.seed(3585)
+  fit[[usemethod]] <- train(classe~.,data=training, method=usemethod, trControl=ctrl)
+}
+```
+
+##Comparing Models
+The calculated accuracy and kappa are charged below.  The top four models are all ensemble tree models.
+```{r}
+results <- resamples(fit)
+summary(results)
+dotplot(results)
+```
+
+We can calculate the expected out of sample error for xgbTree (our top performing model) below by taking the accuracy predicted by cv and subtracting one by it.  This gets us an error of 0.5%.
+```{r}
+1-mean(results$values$`xgbTree~Accuracy`)
+```
+
+The models are then tested against the test data that we removed from the data before performing any training.  We find that the test data is very close to the accuracy found with the cv re-sampling method.
+```{r}
+accuracy <- c()
+for(usemethod in models){
+  prediction <- predict(fit[[usemethod]], newdata=testing)
+  accuracy[usemethod] <- mean(prediction == testing$classe)
+}
+accuracy<-accuracy[order(accuracy,decreasing = TRUE)]
+accuracy
+```
+
+
+##Final Model
+Due to having the highest level of accuracy the xgbTree method will be used for the final model.  First the model will be retrained using all available data.  The predictions will be appended to the training data and saved to a new csv file.
+```{r}
+  final.fit <- train(classe~.,data=pml, method="xgbTree", trControl=ctrl)
+  final.predictions <- predict(final.fit, newdata=pml.test)
+  answers <- data.frame(X=pml.test$X, classe=final.predictions)
+  stopCluster(cl)
+```
+```{r results = 'asis'}
+knitr::kable(answers, caption = "Model Result for Test Data")
+```
